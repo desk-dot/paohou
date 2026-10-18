@@ -59,12 +59,27 @@ python -m venv .venv
 
 测试中的 `FakeClient` 是确定性测试替身，不发送网络请求。真实模型评测需另行记录截图字段正确率、人工修正数量、是否忠实引用工具数值、是否保留数据限制，以及模型、耗时与失败情况。
 
+## 命令行复盘
+
+不打开页面、不调用模型，直接对一份记录 JSON 生成本地规则复盘：
+
+```powershell
+# 打印到终端
+.\.venv\Scripts\python.exe review_file.py examples/demo.json
+
+# 保存为 UTF-8 Markdown（目标已存在或与输入路径相同时拒绝执行）
+.\.venv\Scripts\python.exe review_file.py examples/demo.json --output review.md
+```
+
+文件不存在、JSON 无法解析或记录校验失败时，打印错误并以非零状态退出，不写出报告。
+
 ## 文件
 
 - `streamlit_app.py`：上传、确认、复盘页面。
 - `analysis_tools.py`：校验及可重复计算的指标。
 - `model_client.py`：模型接口及截图提取提示词。
 - `agent.py`：受限工具调用循环及复盘提示词。
+- `review_file.py`：命令行入口：校验 JSON 记录并输出本地复盘报告，不调用模型。
 - `examples/demo.json`：明确标注的合成数据。
 - `tests/`：数值、Agent 控制、页面交互测试。
 - `docs/opencode-first-task.md`：学生在 OpenCode 中完成首次实践的独立小任务。
