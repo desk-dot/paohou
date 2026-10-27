@@ -116,6 +116,89 @@ def calculate_metrics(record):
     }
 
 
+COMPARE_FIELDS = ("average_pace", "cadence_spm", "step_length_m", "elevation_gain_m")
+COMPARE_LABELS = {"average_pace": "均配速", "cadence_spm": "步频",
+                  "step_length_m": "步幅", "elevation_gain_m": "爬升"}
+_METRIC_KEY = {"average_pace": "average_pace_s_per_km"}
+
+
+def _compare_tolerances(metrics):
+    """Engineering tolerances per field; None when the field is missing."""
+    pace = None if metrics["average_pace_s_per_km"] is None else \
+        max(5, metrics["duration_s"] * 0.01) / metrics["distance_km"]
+    cadence = metrics["cadence_spm"]
+    step = metrics["step_length_m"]
+    gain = metrics["elevation_gain_m"]
+    return {
+        "average_pace": pace,
+        "cadence_spm": None if cadence is None else max(1, cadence * 0.01),
+        "step_length_m": None if step is None else max(0.01, step * 0.01),
+        "elevation_gain_m": None if gain is None else max(1, gain * 0.05),
+    }
+
+
+def _clean_number(value):
+    value = round(value, 3)
+    return int(value) if value == int(value) else value
+
+
+def compare_runs(raw_runs):
+    """Compare 2–20 confirmed run records pairwise using per-run tolerances.
+
+    Verdict is "close" when the absolute difference does not exceed the sum of
+    both runs' tolerances, "unknown" when either side is missing, otherwise
+    "different". These are engineering tolerances, not sports-science thresholds.
+    """
+    if not isinstance(raw_runs, (list, tuple)) or not 2 <= len(raw_runs) <= 20:
+        raise ValueError("compare_runs 需要 2 到 20 条已确认记录")
+    runs = []
+    for index, raw in enumerate(raw_runs, 1):
+        metrics = calculate_metrics(validate_record(raw))
+        runs.append({"metrics": metrics, "summary": {
+            "index": index,
+            "distance_km": metrics["distance_km"],
+            "average_pace": metrics["average_pace"],
+            "second_minus_first_half_s_per_km": metrics["second_minus_first_half_s_per_km"],
+            "cadence_spm": metrics["cadence_spm"],
+            "step_length_m": metrics["step_length_m"],
+            "elevation_gain_m": metrics["elevation_gain_m"],
+            "scope": metrics["scope"],
+            "warnings": list(metrics["warnings"]),
+            "tolerances": _compare_tolerances(metrics),
+        }})
+    comparisons = {field: [] for field in COMPARE_FIELDS}
+    notes = ["前后半程差没有定义工程容差，仅返回数值，不参与 close/unknown 判定。"]
+    for position_a in range(len(runs)):
+        for position_b in range(position_a + 1, len(runs)):
+            run_a, run_b = runs[position_a], runs[position_b]
+            pair = [run_a["summary"]["index"], run_b["summary"]["index"]]
+            if run_a["metrics"]["scope"] != run_b["metrics"]["scope"]:
+                notes.append(f"第 {pair[0]} 次与第 {pair[1]} 次统计口径不同"
+                             f"（{run_a['metrics']['scope']} vs {run_b['metrics']['scope']}），"
+                             "均配速相关比较仅供参考。")
+            for field in COMPARE_FIELDS:
+                value_a = run_a["metrics"][_METRIC_KEY.get(field, field)]
+                value_b = run_b["metrics"][_METRIC_KEY.get(field, field)]
+                tol_a = run_a["summary"]["tolerances"][field]
+                tol_b = run_b["summary"]["tolerances"][field]
+                if None in (value_a, value_b, tol_a, tol_b):
+                    comparisons[field].append({"pair": pair, "delta": None, "verdict": "unknown"})
+                    notes.append(f"第 {pair[0]} 次与第 {pair[1]} 次有一方缺少{COMPARE_LABELS[field]}，比较标记为 unknown。")
+                else:
+                    verdict = "close" if abs(value_a - value_b) <= tol_a + tol_b else "different"
+                    comparisons[field].append({"pair": pair,
+                                               "delta": _clean_number(abs(value_a - value_b)),
+                                               "verdict": verdict})
+    for run in runs:
+        index = run["summary"]["index"]
+        if run["metrics"]["second_minus_first_half_s_per_km"] is None:
+            notes.append(f"第 {index} 次分段不足 2 段，前后半程差未计算。")
+        if run["summary"]["warnings"]:
+            notes.append(f"第 {index} 次有 {len(run['summary']['warnings'])} 条数据警告，比较前请先核对。")
+    return {"count": len(runs), "runs": [run["summary"] for run in runs],
+            "comparisons": comparisons, "comparability_notes": notes}
+
+
 def local_review(metrics):
     """Transparent fallback: observations, no invented physiology or prescriptions."""
     def display(value, unit):
@@ -138,3 +221,67 @@ def local_review(metrics):
     if not metrics["warnings"]:
         lines.append("当前字段未触发一致性提醒；仍需与原图核对。")
     return "\n".join(lines)
+
+
+# 比较字段：容差键 -> runs 条目中的取值键。前后半程差没有给定容差口径，
+# 只随单次结果返回，不参与两两判定。
+COMPARE_FIELDS = [("pace_s_per_km", "average_pace_s_per_km"),
+                  ("cadence_spm", "cadence_spm"),
+                  ("step_length_m", "step_length_m"),
+                  ("elevation_gain_m", "elevation_gain_m")]
+
+
+def compare_runs(raw_runs):
+    """Compare 2-20 confirmed running records pairwise with engineering tolerances.
+
+    Per-run tolerance: pace max(5, duration*1%)/distance; cadence max(1, v*1%);
+    step length max(0.01, v*1%); elevation gain max(1, v*5%).
+    A field verdicts "close" when abs diff <= sum of both runs' tolerances,
+    "unknown" when either side is missing, otherwise "different".
+    Tolerances are engineering checks, not sport-science thresholds.
+    """
+    if not isinstance(raw_runs, (list, tuple)):
+        raise ValueError("compare_runs 需要记录列表")
+    if not 2 <= len(raw_runs) <= 20:
+        raise ValueError(f"compare_runs 需要 2 到 20 条记录，实际 {len(raw_runs)} 条")
+    runs = []
+    for raw in raw_runs:
+        metrics = calculate_metrics(validate_record(raw))
+        duration, distance = metrics["duration_s"], metrics["distance_km"]
+        cadence, step_length = metrics["cadence_spm"], metrics["step_length_m"]
+        gain = metrics["elevation_gain_m"]
+        runs.append({
+            "distance_km": distance,
+            "duration_s": duration,
+            "average_pace_s_per_km": metrics["average_pace_s_per_km"],
+            "average_pace": metrics["average_pace"],
+            "second_minus_first_half_s_per_km": metrics["second_minus_first_half_s_per_km"],
+            "cadence_spm": cadence,
+            "step_length_m": step_length,
+            "elevation_gain_m": gain,
+            "scope": metrics["scope"],
+            "warnings": metrics["warnings"],
+            "tolerances": {
+                "pace_s_per_km": max(5, duration * 0.01) / distance,
+                "cadence_spm": None if cadence is None else max(1, cadence * 0.01),
+                "step_length_m": None if step_length is None else max(0.01, step_length * 0.01),
+                "elevation_gain_m": None if gain is None else max(1, gain * 0.05),
+            },
+        })
+    comparisons = []
+    for i in range(len(runs)):
+        for j in range(i + 1, len(runs)):
+            fields = {}
+            for tol_key, value_key in COMPARE_FIELDS:
+                a, b = runs[i][value_key], runs[j][value_key]
+                if a is None or b is None:
+                    fields[tol_key] = {"values": [a, b], "abs_diff": None,
+                                       "tolerance_sum": None, "verdict": "unknown"}
+                    continue
+                diff = abs(a - b)
+                tol_sum = runs[i]["tolerances"][tol_key] + runs[j]["tolerances"][tol_key]
+                fields[tol_key] = {"values": [a, b], "abs_diff": diff,
+                                   "tolerance_sum": tol_sum,
+                                   "verdict": "close" if diff <= tol_sum else "different"}
+            comparisons.append({"pair": [i, j], "fields": fields})
+    return {"runs": runs, "comparisons": comparisons}
