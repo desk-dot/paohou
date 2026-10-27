@@ -116,6 +116,89 @@ def calculate_metrics(record):
     }
 
 
+COMPARE_FIELDS = ("average_pace", "cadence_spm", "step_length_m", "elevation_gain_m")
+COMPARE_LABELS = {"average_pace": "均配速", "cadence_spm": "步频",
+                  "step_length_m": "步幅", "elevation_gain_m": "爬升"}
+_METRIC_KEY = {"average_pace": "average_pace_s_per_km"}
+
+
+def _compare_tolerances(metrics):
+    """Engineering tolerances per field; None when the field is missing."""
+    pace = None if metrics["average_pace_s_per_km"] is None else \
+        max(5, metrics["duration_s"] * 0.01) / metrics["distance_km"]
+    cadence = metrics["cadence_spm"]
+    step = metrics["step_length_m"]
+    gain = metrics["elevation_gain_m"]
+    return {
+        "average_pace": pace,
+        "cadence_spm": None if cadence is None else max(1, cadence * 0.01),
+        "step_length_m": None if step is None else max(0.01, step * 0.01),
+        "elevation_gain_m": None if gain is None else max(1, gain * 0.05),
+    }
+
+
+def _clean_number(value):
+    value = round(value, 3)
+    return int(value) if value == int(value) else value
+
+
+def compare_runs(raw_runs):
+    """Compare 2–20 confirmed run records pairwise using per-run tolerances.
+
+    Verdict is "close" when the absolute difference does not exceed the sum of
+    both runs' tolerances, "unknown" when either side is missing, otherwise
+    "different". These are engineering tolerances, not sports-science thresholds.
+    """
+    if not isinstance(raw_runs, (list, tuple)) or not 2 <= len(raw_runs) <= 20:
+        raise ValueError("compare_runs 需要 2 到 20 条已确认记录")
+    runs = []
+    for index, raw in enumerate(raw_runs, 1):
+        metrics = calculate_metrics(validate_record(raw))
+        runs.append({"metrics": metrics, "summary": {
+            "index": index,
+            "distance_km": metrics["distance_km"],
+            "average_pace": metrics["average_pace"],
+            "second_minus_first_half_s_per_km": metrics["second_minus_first_half_s_per_km"],
+            "cadence_spm": metrics["cadence_spm"],
+            "step_length_m": metrics["step_length_m"],
+            "elevation_gain_m": metrics["elevation_gain_m"],
+            "scope": metrics["scope"],
+            "warnings": list(metrics["warnings"]),
+            "tolerances": _compare_tolerances(metrics),
+        }})
+    comparisons = {field: [] for field in COMPARE_FIELDS}
+    notes = ["前后半程差没有定义工程容差，仅返回数值，不参与 close/unknown 判定。"]
+    for position_a in range(len(runs)):
+        for position_b in range(position_a + 1, len(runs)):
+            run_a, run_b = runs[position_a], runs[position_b]
+            pair = [run_a["summary"]["index"], run_b["summary"]["index"]]
+            if run_a["metrics"]["scope"] != run_b["metrics"]["scope"]:
+                notes.append(f"第 {pair[0]} 次与第 {pair[1]} 次统计口径不同"
+                             f"（{run_a['metrics']['scope']} vs {run_b['metrics']['scope']}），"
+                             "均配速相关比较仅供参考。")
+            for field in COMPARE_FIELDS:
+                value_a = run_a["metrics"][_METRIC_KEY.get(field, field)]
+                value_b = run_b["metrics"][_METRIC_KEY.get(field, field)]
+                tol_a = run_a["summary"]["tolerances"][field]
+                tol_b = run_b["summary"]["tolerances"][field]
+                if None in (value_a, value_b, tol_a, tol_b):
+                    comparisons[field].append({"pair": pair, "delta": None, "verdict": "unknown"})
+                    notes.append(f"第 {pair[0]} 次与第 {pair[1]} 次有一方缺少{COMPARE_LABELS[field]}，比较标记为 unknown。")
+                else:
+                    verdict = "close" if abs(value_a - value_b) <= tol_a + tol_b else "different"
+                    comparisons[field].append({"pair": pair,
+                                               "delta": _clean_number(abs(value_a - value_b)),
+                                               "verdict": verdict})
+    for run in runs:
+        index = run["summary"]["index"]
+        if run["metrics"]["second_minus_first_half_s_per_km"] is None:
+            notes.append(f"第 {index} 次分段不足 2 段，前后半程差未计算。")
+        if run["summary"]["warnings"]:
+            notes.append(f"第 {index} 次有 {len(run['summary']['warnings'])} 条数据警告，比较前请先核对。")
+    return {"count": len(runs), "runs": [run["summary"] for run in runs],
+            "comparisons": comparisons, "comparability_notes": notes}
+
+
 def local_review(metrics):
     """Transparent fallback: observations, no invented physiology or prescriptions."""
     def display(value, unit):
