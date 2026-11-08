@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 import unittest
 
-from analysis_tools import calculate_metrics, format_pace, pace_seconds, validate_record
+from analysis_tools import calculate_metrics, compare_runs, format_pace, pace_seconds, validate_record
 
 DEMO = json.loads((Path(__file__).parents[1] / "examples/demo.json").read_text(encoding="utf-8"))
 
@@ -54,6 +54,37 @@ class AnalysisTests(unittest.TestCase):
     def test_keep_pace_and_rounding(self):
         self.assertEqual(pace_seconds('6′05″'), 365)
         self.assertEqual(format_pace(359.9), "6:00")
+
+    def test_compare_identical_runs_and_missing_field(self):
+        result = compare_runs([DEMO, copy.deepcopy(DEMO)])
+        self.assertEqual(result["count"], 2)
+        self.assertEqual(result["comparisons"]["average_pace"][0],
+                         {"pair": [1, 2], "delta": 0, "verdict": "close"})
+        self.assertEqual(result["comparisons"]["step_length_m"][0]["verdict"], "unknown")
+
+    def test_compare_tolerance_boundary_and_outside(self):
+        base = {"total_distance_km": 1, "total_duration_s": 300,
+                "cadence_spm": 100, "step_length_m": 1, "elevation_gain_m": 0}
+        at_boundary = dict(base, total_duration_s=310)
+        outside = dict(base, total_duration_s=311)
+        # Each run has a 5 s/km minimum pace tolerance; equality is close.
+        self.assertEqual(compare_runs([base, at_boundary])["comparisons"]["average_pace"][0]["verdict"], "close")
+        self.assertEqual(compare_runs([base, outside])["comparisons"]["average_pace"][0]["verdict"], "different")
+        self.assertEqual(compare_runs([base, at_boundary])["runs"][0]["tolerances"]["elevation_gain_m"], 1)
+
+    def test_compare_count_and_invalid_record_boundaries(self):
+        for runs in ([DEMO], [DEMO] * 21, "not-a-list"):
+            with self.subTest(size=len(runs)), self.assertRaises(ValueError):
+                compare_runs(runs)
+        self.assertEqual(compare_runs([DEMO] * 20)["count"], 20)
+        with self.assertRaisesRegex(ValueError, "总距离"):
+            compare_runs([DEMO, {"total_distance_km": -1, "total_duration_s": 300}])
+
+    def test_compare_mixed_scope_is_flagged(self):
+        split_only = copy.deepcopy(DEMO)
+        split_only["total_duration_s"] = None
+        result = compare_runs([DEMO, split_only])
+        self.assertTrue(any("统计口径不同" in note for note in result["comparability_notes"]))
 
 
 if __name__ == "__main__":
